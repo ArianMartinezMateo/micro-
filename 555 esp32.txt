@@ -1,0 +1,154 @@
+// Emulador NE555 en ESP32 - Versión Final Integrada
+// Incluye: WiFi, página web moderna, modo Astable/Monostable, PWM controlado, botón de interrupción
+
+#include <WiFi.h>
+#include <ESPAsyncWebServer.h>
+
+// Configuración WiFi
+const char* ssid = "TU_SSID";
+const char* password = "TU_PASSWORD";
+
+AsyncWebServer server(80);
+
+// Pines
+const int pwmPin = 18; // PWM salida
+const int potPin = 34; // Potenciómetro para variar PWM
+const int buttonPin = 25; // Botón de interrupción
+
+// Variables
+volatile bool trigger = false;
+
+// HTML de la página web
+String htmlPage = R"rawliteral(
+<!DOCTYPE html>
+<html>
+<head>
+  <title>Emulador NE555 - ESP32</title>
+  <meta charset="utf-8">
+  <style>
+    body { background: #121212; color: #ffffff; font-family: Arial, sans-serif; padding: 20px; }
+    .card { background: #1f1f1f; padding: 20px; border-radius: 15px; box-shadow: 0 0 10px #00ff99; max-width: 400px; margin: auto; }
+    input, select, button { margin: 10px 0; width: 100%; padding: 10px; border-radius: 5px; border: none; }
+    button { background-color: #00ff99; color: #000; font-weight: bold; cursor: pointer; }
+    button:hover { background-color: #00cc77; }
+    img { width: 100%; margin-top: 15px; border-radius: 10px; }
+    h2 { text-align: center; }
+  </style>
+</head>
+<body>
+  <div class="card">
+    <h2>Emulador NE555</h2>
+    <label>Modo:</label>
+    <select id="mode">
+      <option value="astable">Astable</option>
+      <option value="monostable">Monostable</option>
+    </select>
+    <label>R1 (Ohm):</label>
+    <input type="number" id="r1" required>
+    <label>R2 (Ohm):</label>
+    <input type="number" id="r2" required>
+    <label>C (uF):</label>
+    <input type="number" id="c" required>
+    <button onclick="sendData()">Ejecutar</button>
+    <button onclick="stop()">Detener</button>
+    <p id="result"></p>
+    <img src="https://upload.wikimedia.org/wikipedia/commons/thumb/3/3f/NE555_Astable_Diagram.svg/500px-NE555_Astable_Diagram.svg.png" alt="Circuito 555">
+  </div>
+
+<script>
+  function sendData() {
+    const mode = document.getElementById('mode').value;
+    const r1 = document.getElementById('r1').value;
+    const r2 = document.getElementById('r2').value;
+    const c = document.getElementById('c').value;
+    fetch(`/calculate?mode=${mode}&r1=${r1}&r2=${r2}&c=${c}`)
+      .then(response => response.text())
+      .then(data => {
+        document.getElementById('result').innerText = data;
+      });
+  }
+  function stop() {
+    fetch('/stop')
+      .then(response => response.text())
+      .then(data => {
+        document.getElementById('result').innerText = "Simulación detenida.";
+      });
+  }
+</script>
+</body>
+</html>
+)rawliteral";
+
+void IRAM_ATTR handleInterrupt() {
+  trigger = true;
+}
+
+void setup() {
+  Serial.begin(115200);
+
+  // Pines
+  pinMode(pwmPin, OUTPUT);
+  pinMode(buttonPin, INPUT_PULLUP);
+  attachInterrupt(buttonPin, handleInterrupt, FALLING);
+
+  // PWM setup
+  ledcSetup(0, 5000, 8);
+  ledcAttachPin(pwmPin, 0);
+
+  // Conexión WiFi
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nConectado a WiFi. IP: " + WiFi.localIP().toString());
+
+  // Servidor Web
+  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request){
+    request->send(200, "text/html", htmlPage);
+  });
+
+  server.on("/calculate", HTTP_GET, [](AsyncWebServerRequest *request){
+    String mode = request->getParam("mode")->value();
+    float r1 = request->getParam("r1")->value().toFloat();
+    float r2 = request->getParam("r2")->value().toFloat();
+    float c = request->getParam("c")->value().toFloat() / 1000000.0;
+    String result = "";
+
+    if (mode == "astable") {
+      float t1 = 0.693 * (r1 + r2) * c;
+      float t2 = 0.693 * r2 * c;
+      float period = t1 + t2;
+      float freq = 1.0 / period;
+      float duty = (t1 / period) * 100.0;
+      result = "Modo: Astable\nFrecuencia: " + String(freq, 2) + " Hz\nDuty Cycle: " + String(duty, 1) + "%";
+    } else {
+      float pulse = 1.1 * r1 * c;
+      result = "Modo: Monostable\nPulso: " + String(pulse, 4) + " segundos";
+    }
+
+    request->send(200, "text/plain", result);
+  });
+
+  server.on("/stop", HTTP_GET, [](AsyncWebServerRequest *request){
+    ledcWrite(0, 0);
+    request->send(200, "text/plain", "Detenido");
+  });
+
+  server.begin();
+}
+
+void loop() {
+  int potValue = analogRead(potPin);
+  int pwmDuty = map(potValue, 0, 4095, 0, 255);
+  ledcWrite(0, pwmDuty);
+
+  if (trigger) {
+    trigger = false;
+    digitalWrite(pwmPin, HIGH);
+    delay(500); // Duración del pulso monostable
+    digitalWrite(pwmPin, LOW);
+  }
+
+  delay(100);
+}
